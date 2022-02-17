@@ -1,0 +1,74 @@
+---
+- hosts: windows
+  tasks:
+    - set_fact:
+        upn: "${p:upn}"
+        domain: "${p:domain}"
+        domain_user: "${p:domain_user}@${p:domain}"
+        domain_password: "${p:domain_password}"
+        domain_ou: "${p:domain_ou}"
+
+    - name: Add VM to a Domain
+      win_shell: |
+        $user = "{{domain_user}}"
+        $password = ConvertTo-SecureString -String "{{domain_password}}" -AsPlainText -Force
+        $credential = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $user, $password
+        Add-Computer -DomainName {{domain}} -OUPath "{{domain_ou}}" -Credential $credential –Verbose -Force
+
+    - name: Reboot the machine with all defaults
+      win_reboot:
+
+    - name: Add an AD user to the local administrator group
+      win_shell: net localgroup Administrators /add {{upn}}
+
+- hosts: linux
+  tasks:
+    - set_fact:
+        upn: "${p:upn}"
+        domain: "${p:domain}"
+        domain_user: "${p:domain_user}"
+        domain_password: "${p:domain_password}"
+        domain_ou: "${p:domain_ou}"
+
+    - name: Install Prerequisites
+      shell: yum install realmd sssd oddjob oddjob-mkhomedir adcli -y
+      when: ansible_facts["distribution"]=="RedHat"
+      become: yes
+
+    - name: Install Prerequisites
+      shell: apt -y install realmd libnss-sss libpam-sss sssd sssd-tools adcli samba-common-bin oddjob oddjob-mkhomedir packagekit
+      when: ansible_facts["distribution"]=="Ubuntu"
+      become: yes
+
+    - name: Join VM to Domain
+      shell: echo "{{domain_password}}" | realm join "{{domain}}" -U "{{domain_user}}" --computer-ou="{{domain_ou}}" --verbose
+      become: yes
+
+    - name: Add AD user to SSSD Conf
+      block:
+        - name: Remove Access Provider from SSSD Conf
+          shell: sed -i "/access_provider/d" /etc/sssd/sssd.conf
+
+        - name: Change Access Provider to Simple
+          shell: sed -i "$ a access_provider = simple" /etc/sssd/sssd.conf
+
+        - name: Add AD user to SSSD Conf
+          shell: sed -i "$ a simple_allow_users = {{upn}}" /etc/sssd/sssd.conf
+      become: yes
+
+    - name: Restart SSSD Service
+      shell: systemctl restart sssd
+      become: yes
+
+    - name: Get AD User Info
+      shell: id {{upn}}
+      become: yes
+
+    - name: Create AD User Directory
+      shell: mkhomedir_helper {{upn}}
+      when: ansible_facts["distribution"]=="Ubuntu"
+      become: yes
+
+    - name: Add AD user to sudoers File
+      shell: sed -i "$ a {{upn}} ALL=(ALL)       ALL" /etc/sudoers
+      become: yes
